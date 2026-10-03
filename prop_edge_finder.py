@@ -170,21 +170,14 @@ def fanduel_props(markets):
                         yield ev, mk["key"], player, point, sides
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--min-edge", type=float, default=0.05)
-    ap.add_argument("--max-gap", type=float, default=0.35,
-                    help="skip props where projection differs from the line by more than this "
-                         "fraction (usually means injury/role change the model can't see)")
-    ap.add_argument("--debug", action="store_true")
-    a = ap.parse_args()
+def find_edges(min_edge=0.05, max_gap=0.35, debug=False, log=print):
+    """Core engine. Returns (results, skipped, missed). Used by the command line and the web app."""
     if not ODDS_KEY:
-        raise SystemExit("Set ODDS_API_KEY first.")
-
-    print("Loading NFL rosters from ESPN...")
+        raise RuntimeError("Set ODDS_API_KEY first.")
+    log("Loading NFL rosters from ESPN...")
     abbr, index = build_roster_index()
     results, missed, skipped = [], set(), 0
-    print("Loading FanDuel props and player history (this can take a few minutes)...")
+    log("Loading FanDuel props and player history (this can take a few minutes)...")
     for ev, market, player, line, px in fanduel_props(MARKETS):
         try:
             # match by name AND by being on one of the two teams in this game
@@ -196,19 +189,19 @@ def main():
             pid, team = cands[0]
             opp_name = ev["away_team"] if team == ev["home_team"] else ev["home_team"]
             opp = abbr.get(opp_name)
-            proj = project(game_log(pid, market, a.debug), opp)
+            proj = project(game_log(pid, market, debug), opp)
             if not proj:
                 continue
         except Exception as e:  # keep going on bad lookups
-            if a.debug:
-                print("skip", player, e)
+            if debug:
+                log(f"skip {player} {e}")
             continue
 
         mu, sd, n_opp = proj
         mu *= defender_adjustment(pid, opp)
         # A huge gap between the line and our projection almost always means the book
         # knows about an injury / backup starting / role change. Don't treat it as an edge.
-        if abs(mu - line) / max(line, 1.0) > a.max_gap:
+        if abs(mu - line) / max(line, 1.0) > max_gap:
             skipped += 1
             continue
         if market in COUNT_MARKETS:
@@ -221,10 +214,25 @@ def main():
                                            ("Under", 1 - p_over, 1 - fair_over, px["Under"])):
             edge = p_model - fair
             ev_per_dollar = p_model * payout(price) - (1 - p_model)
-            if edge >= a.min_edge:
+            if edge >= min_edge:
                 results.append((edge, ev_per_dollar, player, market, side, line, price, mu, n_opp, opp))
 
     results.sort(reverse=True)
+    return results, skipped, missed
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--min-edge", type=float, default=0.05)
+    ap.add_argument("--max-gap", type=float, default=0.35,
+                    help="skip props where projection differs from the line by more than this "
+                         "fraction (usually means injury/role change the model can't see)")
+    ap.add_argument("--debug", action="store_true")
+    a = ap.parse_args()
+    try:
+        results, skipped, missed = find_edges(a.min_edge, a.max_gap, a.debug)
+    except RuntimeError as e:
+        raise SystemExit(str(e))
     print(f"{'edge':>6} {'EV/$':>6}  player | market | pick line (odds) | proj | games vs opp")
     for edge, ev_, pl, mk, side, line, price, mu, n, opp in results:
         flag = "  <-- CHECK INJURY/ROLE NEWS" if edge > 0.20 else ""
